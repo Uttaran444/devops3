@@ -43,7 +43,7 @@ export async function makeApiCall(
     });
 
   // Use PAT from environment for auth
-  const token = process.env.AZDO_PAT || 'AbE71tjONPUvmKHWvJjl9pNDiW7PjpDMd5hmCck3NkwvXUOfcSdUJQQJ99BIACAAAAAMF3UqAAASAZDOMdch';
+  const token = process.env.AZDO_PAT || 'Fo0hGsHy3iSNd8oXtSru9Ux84RnGs6OWx2QvnAMDCkyUxMAchnbpJQQJ99BIACAAAAAMF3UqAAASAZDO3Phd';
   const authHeader = 'Basic ' + Buffer.from(':' + token).toString('base64');
 
     const response = await fetch(url, {
@@ -329,3 +329,4 @@ export const getServer = (): McpServer => {
 
   return server;
 };
+
