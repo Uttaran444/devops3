@@ -1,9 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import express from 'express';
 
 import * as azdev from 'azure-devops-node-api';
-import * as WorkItemTrackingApi from 'azure-devops-node-api/WorkItemTrackingApi';
+import { IWorkItemTrackingApi } from 'azure-devops-node-api/WorkItemTrackingApi';
 
 import 'dotenv/config'
 
@@ -26,7 +27,7 @@ server.tool(
 
       const authHandler = azdev.getPersonalAccessTokenHandler(token);
       const connection = new azdev.WebApi(orgUrl, authHandler);
-      const witApi: WorkItemTrackingApi.IWorkItemTrackingApi = await connection.getWorkItemTrackingApi();
+      const witApi: IWorkItemTrackingApi = await connection.getWorkItemTrackingApi();
 
       const wiqlQuery1 = {
         query: `
@@ -77,7 +78,6 @@ server.tool(
     }
   },
 );
-
 const transport = new StdioServerTransport();
 (async () => {
   await server.connect(transport);
