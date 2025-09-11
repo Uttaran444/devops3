@@ -5,6 +5,11 @@ import { IWorkItemTrackingApi } from 'azure-devops-node-api/WorkItemTrackingApi'
 import { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import 'dotenv/config';
 
+// Define the schema using z.object and .shape
+const getWorkItemListByTypeSchema = z.object({
+  workItemType: z.string().describe('Work item type like Bug, Task, User Story'),
+});
+
 export const getServer = (): McpServer => {
   const server = new McpServer({
     name: 'azure-devops-mcp-server',
@@ -13,9 +18,8 @@ export const getServer = (): McpServer => {
 
   server.tool(
     'getWorkItemListByType',
-    z.object({
-      workItemType: z.string().describe('Work item type like Bug, Task, User Story'),
-    }).shape,
+    'Fetches a list of work items by type from Azure DevOps.',
+    getWorkItemListByTypeSchema.shape,
     async (args, context: RequestHandlerExtra<any, any>) => {
       const { workItemType } = args;
       try {
