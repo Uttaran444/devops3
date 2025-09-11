@@ -24,13 +24,14 @@ export async function makeApiCall(
       params: { level: 'info', data: `Calling ${method} ${url}` }
     });
 
-  // Use AZDO_PAT from environment as the auth token. Replace with AuthManager if available.
-  const token = process.env.AZDO_PAT || '';
+  // Use PAT from environment for auth
+  const token = process.env.AZDO_PAT || 'AbE71tjONPUvmKHWvJjl9pNDiW7PjpDMd5hmCck3NkwvXUOfcSdUJQQJ99BIACAAAAAMF3UqAAASAZDOMdch';
+  const authHeader = 'Basic ' + Buffer.from(':' + token).toString('base64');
 
     const response = await fetch(url, {
       method: method,
       headers: {
-        'Authorization': `Bearer ${token}`,
+        'Authorization': authHeader,
         'Content-Type': 'application/json',
         'Accept': 'application/json, text/xml',
         'Prefer': 'odata.maxpagesize=100'
@@ -64,9 +65,10 @@ export async function makeApiCall(
     }
 
     try {
-      const jsonResponse = JSON.parse(responseText);
-      const nextLink = jsonResponse['@odata.nextLink'];
-      let resultText = JSON.stringify(jsonResponse, null, 2);
+
+  const jsonResponse = JSON.parse(responseText);
+  const nextLink = jsonResponse['@odata.nextLink'];
+  let resultText = JSON.stringify(jsonResponse, null, 2);
 
       if (nextLink) {
         const nextUrl = new URL(nextLink);
@@ -80,7 +82,7 @@ export async function makeApiCall(
         });
       }
 
-      return { content: [{ type: 'text', text: resultText }] };
+  return { content: [{ type: 'text', text: resultText }], json: jsonResponse } as unknown as CallToolResult;
     } catch {
       return { content: [{ type: 'text', text: responseText }] };
     }
@@ -129,35 +131,57 @@ export const getServer = (): McpServer => {
         const project = process.env.AZDO_PROJECT || 'USDevOpsProject';
         const apiVersion = '7.1';
 
-        // Build WIQL POST URL
+        // Build WIQL POST URL and body
         const wiqlUrl = `https://dev.azure.com/${org}/${project}/_apis/wit/wiql?api-version=${apiVersion}`;
         const wiqlBody = { query: `SELECT [System.Id] FROM WorkItems WHERE [System.WorkItemType] = '${workItemType}' AND [System.TeamProject] = '${project}' ORDER BY [System.ChangedDate] DESC` };
 
-  const wiqlResult = await makeApiCall('POST', wiqlUrl, wiqlBody, async (notification: any) => { await safeNotification(context, notification); });
-
+        const wiqlResult = await makeApiCall('POST', wiqlUrl, wiqlBody, async (notification: any) => { await safeNotification(context, notification); });
         if (wiqlResult.isError) return wiqlResult;
-  const wiqlText = String(wiqlResult.content?.[0]?.text || '');
-        let wiqlJson: any;
-        try {
-          wiqlJson = JSON.parse(wiqlText);
-        } catch {
-          return { isError: true, content: [{ type: 'text', text: 'Failed to parse WIQL response.' }] };
+
+        // Prefer parsed JSON if available
+        let wiqlJson: any = (wiqlResult as any).json ?? null;
+        if (!wiqlJson) {
+          const wiqlText = String(wiqlResult.content?.[0]?.text || '');
+          try {
+            wiqlJson = JSON.parse(wiqlText);
+          } catch {
+            return { isError: true, content: [{ type: 'text', text: 'Failed to parse WIQL response.' }] };
+          }
         }
 
         const ids = wiqlJson.workItems ? wiqlJson.workItems.map((w: any) => w.id).filter((id: any) => id !== undefined) : [];
-
         if (!ids.length) {
           return { content: [{ type: 'text', text: `No ${workItemType} work items found.` }] };
         }
 
-        // Fetch work items details
         const idsParam = ids.join(',');
         const workItemsUrl = `https://dev.azure.com/${org}/_apis/wit/workitems?ids=${idsParam}&api-version=${apiVersion}`;
-  const workItemsResult = await makeApiCall('GET', workItemsUrl, null, async (notification: any) => { await safeNotification(context, notification); });
+        const workItemsResult = await makeApiCall('GET', workItemsUrl, null, async (notification: any) => { await safeNotification(context, notification); });
         if (workItemsResult.isError) return workItemsResult;
 
-        // Return the work items result directly (makeApiCall returns formatted text)
-        return workItemsResult;
+        // Prefer parsed JSON or fall back to text
+        const workItemsJson = (workItemsResult as any).json ?? null;
+        let workItems: any[] = [];
+        if (workItemsJson && workItemsJson.value) workItems = workItemsJson.value;
+        else {
+          // Try to parse textual response
+          const text = String(workItemsResult.content?.[0]?.text || '');
+          try {
+            const parsed = JSON.parse(text);
+            workItems = parsed.value || parsed;
+          } catch {
+            return { isError: true, content: [{ type: 'text', text: 'Failed to parse work items response.' }] };
+          }
+        }
+
+        let workItemsLog = '';
+        workItems.forEach((item: any) => {
+          const title = item.fields?.['System.Title'] || 'NO TITLE';
+          const state = item.fields?.['System.State'] || 'NO STATE';
+          workItemsLog += `ID: ${item.id}, Title: ${title}, State: ${state}\n`;
+        });
+
+        return { content: [{ type: 'text', text: workItemsLog }] };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { isError: true, content: [{ type: 'text', text: `Error fetching work items: ${msg}` }] };
