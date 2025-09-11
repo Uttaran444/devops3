@@ -1,4 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { makeApiCall } from './api.js';
 import { z } from 'zod';
 import { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import { ServerRequest, ServerNotification } from '@modelcontextprotocol/sdk/types.js';
@@ -52,6 +53,7 @@ export const getServer = (): McpServer => {
 
     return server;
 };
+
 
 
 
