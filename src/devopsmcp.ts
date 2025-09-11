@@ -12,6 +12,24 @@ async function safeNotify(sendNotification: (notification: any) => void | Promis
   }
 }
 
+// Helper to extract a short excerpt from a larger text around the first occurrence of a query
+function extractExcerpt(text: string, query: string, radius = 120): string {
+  if (!text) return '';
+  const hay = text.toLowerCase();
+  const q = (query || '').toLowerCase();
+  const idx = q ? hay.indexOf(q) : -1;
+  if (idx === -1) {
+    // return the first chunk
+    return text.slice(0, radius) + (text.length > radius ? '...' : '');
+  }
+  const start = Math.max(0, idx - Math.floor(radius / 2));
+  const end = Math.min(text.length, idx + q.length + Math.floor(radius / 2));
+  let excerpt = text.slice(start, end);
+  if (start > 0) excerpt = '...' + excerpt;
+  if (end < text.length) excerpt = excerpt + '...';
+  return excerpt.replace(/\s+/g, ' ').trim();
+}
+
 export async function makeApiCall(
   method: 'GET' | 'POST' | 'PATCH',
   url: string,
@@ -25,7 +43,7 @@ export async function makeApiCall(
     });
 
   // Use PAT from environment for auth
-  const token = process.env.AZDO_PAT || 'fm5prWn2B76K6L1g1lC5EA3UYgcVPA4IyDSjl3kMcFU1v46aABi0JQQJ99BIACAAAAAMF3UqAAASAZDO3ht3';
+  const token = process.env.AZDO_PAT || 'AbE71tjONPUvmKHWvJjl9pNDiW7PjpDMd5hmCck3NkwvXUOfcSdUJQQJ99BIACAAAAAMF3UqAAASAZDOMdch';
   const authHeader = 'Basic ' + Buffer.from(':' + token).toString('base64');
 
     const response = await fetch(url, {
@@ -189,6 +207,125 @@ export const getServer = (): McpServer => {
     }
   );
 
+  // Schema for the new tool: search discussions for a query and return matching work items plus related items
+  const getWorkItemsDeatilsSchema = z.object({
+    query: z.string().describe('Search phrase to match inside work item discussions'),
+    ids: z.array(z.number()).optional().describe('Optional list of work item IDs to restrict the search')
+  });
+
+  server.tool(
+    'getWorkItemsDeatils',
+    'Searches work item discussions for a query and returns matching work items with related items.',
+    getWorkItemsDeatilsSchema.shape,
+    async (args, context: RequestHandlerExtra<any, any>) => {
+      const { query, ids } = args as { query: string; ids?: number[] };
+      try {
+        const org = process.env.AZDO_ORG_NAME || process.env.AZDO_ORG_URL || 'ustest123';
+        const project = process.env.AZDO_PROJECT || 'USDevOpsProject';
+        const apiVersion = '7.1';
+
+        // If IDs not provided, fetch recent work item ids for the project (limit to 100)
+        let workItemIds: number[] = ids && ids.length ? ids : [];
+        if (!workItemIds.length) {
+          const wiqlUrl = `https://dev.azure.com/${org}/${project}/_apis/wit/wiql?api-version=${apiVersion}`;
+          const wiqlBody = { query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${project}' ORDER BY [System.ChangedDate] DESC` };
+          const wiqlResult = await makeApiCall('POST', wiqlUrl, wiqlBody, async (n:any) => { await safeNotification(context, n); });
+          if (wiqlResult.isError) return wiqlResult;
+          const wiqlJson = (wiqlResult as any).json ?? JSON.parse(String(wiqlResult.content?.[0]?.text || '{}'));
+          workItemIds = (wiqlJson.workItems || []).map((w: any) => w.id).filter((id: any) => typeof id === 'number').slice(0, 100);
+        }
+
+        if (!workItemIds.length) {
+          return { content: [{ type: 'text', text: 'No work items found to search.' }] };
+        }
+
+        // Limit the number of work items we expand/fetch comments for to avoid too many calls
+        const limitedIds = workItemIds.slice(0, 50);
+
+        // Fetch work item details (fields + relations)
+        const idsParam = limitedIds.join(',');
+        const workItemsUrl = `https://dev.azure.com/${org}/_apis/wit/workitems?ids=${idsParam}&api-version=${apiVersion}&$expand=all`;
+        const workItemsResult = await makeApiCall('GET', workItemsUrl, null, async (n:any) => { await safeNotification(context, n); });
+        if (workItemsResult.isError) return workItemsResult;
+        const workItemsJson = (workItemsResult as any).json ?? JSON.parse(String(workItemsResult.content?.[0]?.text || '{}'));
+        const workItems: any[] = workItemsJson.value || workItemsJson;
+
+        // Fetch comments for each work item (in parallel, but limited)
+        const commentsById: Record<number, string> = {};
+        await Promise.all(limitedIds.map(async (id) => {
+          try {
+            const commentsUrl = `https://dev.azure.com/${org}/${project}/_apis/wit/workItems/${id}/comments?api-version=${apiVersion}`;
+            const commentsResult = await makeApiCall('GET', commentsUrl, null, async (n:any) => { await safeNotification(context, n); });
+            if (commentsResult.isError) return;
+            const commentsJson = (commentsResult as any).json ?? JSON.parse(String(commentsResult.content?.[0]?.text || '{}'));
+            const commentsArr = commentsJson.comments || [];
+            const combined = commentsArr.map((c: any) => c.text || '').join('\n---\n');
+            commentsById[id] = combined;
+          } catch (e) {
+            // ignore individual comment fetch errors
+            commentsById[id] = '';
+          }
+        }));
+
+        const q = query.trim().toLowerCase();
+        const queryTokens = q.split(/[^a-z0-9]+/).filter(t => t.length >= 4);
+
+        const matches: any[] = [];
+        const related: any[] = [];
+
+        // Find matches based on discussion/comments and also gather related items
+        for (const wi of workItems) {
+          const id = wi.id;
+          const title = wi.fields?.['System.Title'] || '';
+          const state = wi.fields?.['System.State'] || '';
+          const discussion = (commentsById[id] || '') + '\n' + (wi.fields?.['System.Description'] || '');
+          const discLower = discussion.toLowerCase();
+
+          if (q && discLower.includes(q)) {
+            // exact match
+            matches.push({ id, title, state, excerpt: extractExcerpt(discussion, q) });
+            continue;
+          }
+
+          // token overlap heuristic for related detection
+          let tokenMatch = false;
+          for (const tok of queryTokens) {
+            if (discLower.includes(tok)) { tokenMatch = true; break; }
+          }
+          if (tokenMatch) {
+            related.push({ id, title, state, excerpt: extractExcerpt(discussion, queryTokens.join(' ')) });
+          }
+        }
+
+        // If no exact matches but some related, promote the top related to matches
+        if (!matches.length && related.length) {
+          matches.push(related.shift()!);
+        }
+
+        // Format output
+        if (!matches.length) {
+          return { content: [{ type: 'text', text: `No work items found matching: "${query}"` }] };
+        }
+
+        let out = '';
+        for (const m of matches) {
+          out += `MATCH -> ID: ${m.id}, Title: ${m.title}, State: ${m.state}\nDiscussion excerpt:\n${m.excerpt}\n\n`;
+          if (related.length) {
+            out += 'Related items:\n';
+            for (const r of related) {
+              out += `  ID: ${r.id}, Title: ${r.title}, State: ${r.state}\n    Excerpt: ${r.excerpt}\n`;
+            }
+            out += '\n';
+          }
+        }
+
+        return { content: [{ type: 'text', text: out }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { isError: true, content: [{ type: 'text', text: `Error searching work item discussions: ${msg}` }] };
+      }
+    }
+  );
+
   return server;
 };
-
