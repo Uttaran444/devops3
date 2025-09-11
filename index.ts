@@ -12,7 +12,7 @@ import 'dotenv/config'
     name: "Azure Devops MCP Server",
     version: "1.0.0",
   });
-
+/**/
 server.tool(
   "getWorkItemListByType",
   {
@@ -79,4 +79,5 @@ server.tool(
 );
 
 const transport = new StdioServerTransport();
+
 await server.connect(transport);
