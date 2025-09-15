@@ -30,6 +30,14 @@ function extractExcerpt(text: string, query: string, radius = 120): string {
   return excerpt.replace(/\s+/g, ' ').trim();
 }
 
+// Remove HTML tags and normalize whitespace
+function stripHtmlAndNormalize(s: string): string {
+  if (!s) return '';
+  // remove tags
+  const noHtml = s.replace(/<[^>]*>/g, ' ');
+  return noHtml.replace(/\s+/g, ' ').trim();
+}
+
 export async function makeApiCall(
   method: 'GET' | 'POST' | 'PATCH',
   url: string,
@@ -43,7 +51,7 @@ export async function makeApiCall(
     });
 
   // Use PAT from environment for auth
-  const token = process.env.AZDO_PAT || 'Fo0hGsHy3iSNd8oXtSru9Ux84RnGs6OWx2QvnAMDCkyUxMAchnbpJQQJ99BIACAAAAAMF3UqAAASAZDO3Phd';
+  const token = process.env.AZDO_PAT || 'AbE71tjONPUvmKHWvJjl9pNDiW7PjpDMd5hmCck3NkwvXUOfcSdUJQQJ99BIACAAAAAMF3UqAAASAZDOMdch';
   const authHeader = 'Basic ' + Buffer.from(':' + token).toString('base64');
 
     const response = await fetch(url, {
@@ -267,8 +275,9 @@ export const getServer = (): McpServer => {
           }
         }));
 
-        const q = query.trim().toLowerCase();
-        const queryTokens = q.split(/[^a-z0-9]+/).filter(t => t.length >= 4);
+        const qRaw = query.trim();
+        const q = stripHtmlAndNormalize(qRaw).toLowerCase();
+        const queryTokens = q.split(/[^a-z0-9]+/).filter(t => t.length >= 3);
 
         const matches: any[] = [];
         const related: any[] = [];
@@ -278,28 +287,29 @@ export const getServer = (): McpServer => {
           const id = wi.id;
           const title = wi.fields?.['System.Title'] || '';
           const state = wi.fields?.['System.State'] || '';
-          const discussion = (commentsById[id] || '') + '\n' + (wi.fields?.['System.Description'] || '');
+          const discussionRaw = (commentsById[id] || '') + '\n' + (wi.fields?.['System.Description'] || '');
+          const discussion = stripHtmlAndNormalize(discussionRaw);
           const discLower = discussion.toLowerCase();
 
           if (q && discLower.includes(q)) {
-            // exact match
-            matches.push({ id, title, state, excerpt: extractExcerpt(discussion, q) });
+            // exact substring match
+            matches.push({ id, title, state, excerpt: extractExcerpt(discussion, qRaw) });
             continue;
           }
 
           // token overlap heuristic for related detection
-          let tokenMatch = false;
+          let matchedTokens = 0;
           for (const tok of queryTokens) {
-            if (discLower.includes(tok)) { tokenMatch = true; break; }
+            if (discLower.includes(tok)) matchedTokens++;
           }
-          if (tokenMatch) {
-            related.push({ id, title, state, excerpt: extractExcerpt(discussion, queryTokens.join(' ')) });
-          }
-        }
+          const overlap = queryTokens.length ? matchedTokens / queryTokens.length : 0;
 
-        // If no exact matches but some related, promote the top related to matches
-        if (!matches.length && related.length) {
-          matches.push(related.shift()!);
+          // If overlap >= 50%, treat as a direct match; if >= 25% treat as related
+          if (overlap >= 0.5) {
+            matches.push({ id, title, state, excerpt: extractExcerpt(discussion, qRaw) });
+          } else if (overlap >= 0.25) {
+            related.push({ id, title, state, excerpt: extractExcerpt(discussion, qRaw) });
+          }
         }
 
         // Format output
@@ -329,4 +339,3 @@ export const getServer = (): McpServer => {
 
   return server;
 };
-
