@@ -38,6 +38,15 @@ function stripHtmlAndNormalize(s: string): string {
   return noHtml.replace(/\s+/g, ' ').trim();
 }
 
+// Tokenize a string into normalized tokens (alphanumeric, length >= minLen)
+function tokenize(s: string, minLen = 2): string[] {
+  if (!s) return [];
+  return stripHtmlAndNormalize(s)
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(t => t.length >= minLen);
+}
+
 export async function makeApiCall(
   method: 'GET' | 'POST' | 'PATCH',
   url: string,
@@ -230,7 +239,7 @@ export const getServer = (): McpServer => {
       try {
         const org = process.env.AZDO_ORG_NAME || process.env.AZDO_ORG_URL || 'ustest123';
         const project = process.env.AZDO_PROJECT || 'USDevOpsProject';
-        const apiVersion = '7.1';
+        const apiVersion = '7.1-preview';
 
         // If IDs not provided, fetch recent work item ids for the project (limit to 100)
         let workItemIds: number[] = ids && ids.length ? ids : [];
@@ -250,13 +259,27 @@ export const getServer = (): McpServer => {
         // Limit the number of work items we expand/fetch comments for to avoid too many calls
         const limitedIds = workItemIds.slice(0, 50);
 
-        // Fetch work item details (fields + relations)
-        const idsParam = limitedIds.join(',');
-        const workItemsUrl = `https://dev.azure.com/${org}/_apis/wit/workitems?ids=${idsParam}&api-version=${apiVersion}&$expand=all`;
-        const workItemsResult = await makeApiCall('GET', workItemsUrl, null, async (n:any) => { await safeNotification(context, n); });
-        if (workItemsResult.isError) return workItemsResult;
-        const workItemsJson = (workItemsResult as any).json ?? JSON.parse(String(workItemsResult.content?.[0]?.text || '{}'));
-        const workItems: any[] = workItemsJson.value || workItemsJson;
+        // Fetch work item details one-by-one (fields + relations) to avoid long comma-separated id lists
+        const workItems: any[] = [];
+        for (const wid of limitedIds) {
+          try {
+            const singleUrl = `https://dev.azure.com/${org}/_apis/wit/workitems/${wid}?api-version=${apiVersion}&$expand=all`;
+            const singleResult = await makeApiCall('GET', singleUrl, null, async (n:any) => { await safeNotification(context, n); });
+            if (singleResult.isError) {
+              // skip this id but notify
+              await safeNotification(context, { method: 'notifications/message', params: { level: 'warning', data: `Skipping work item ${wid} due to fetch error.` } });
+              continue;
+            }
+            const singleJson = (singleResult as any).json ?? JSON.parse(String(singleResult.content?.[0]?.text || '{}'));
+            // If the API returned an object directly, push it; otherwise if wrapped, handle accordingly
+            if (singleJson) {
+              // Azure returns the work item object directly
+              workItems.push(singleJson);
+            }
+          } catch (e) {
+            await safeNotification(context, { method: 'notifications/message', params: { level: 'warning', data: `Error fetching work item ${wid}: ${String(e)}` } });
+          }
+        }
 
         // Fetch comments for each work item (in parallel, but limited)
         const commentsById: Record<number, string> = {};
@@ -276,59 +299,47 @@ export const getServer = (): McpServer => {
         }));
 
         const qRaw = query.trim();
-        const q = stripHtmlAndNormalize(qRaw).toLowerCase();
-        const queryTokens = q.split(/[^a-z0-9]+/).filter(t => t.length >= 3);
+        const queryTokens = tokenize(qRaw, 2);
 
-        const matches: any[] = [];
-        const related: any[] = [];
-
-        // Find matches based on discussion/comments and also gather related items
+        // Compute weighted score per work item based on title and discussion token overlap
+        const scored: Array<{ id: number; title: string; state: string; score: number; excerpt: string }> = [];
         for (const wi of workItems) {
           const id = wi.id;
           const title = wi.fields?.['System.Title'] || '';
           const state = wi.fields?.['System.State'] || '';
           const discussionRaw = (commentsById[id] || '') + '\n' + (wi.fields?.['System.Description'] || '');
-          const discussion = stripHtmlAndNormalize(discussionRaw);
-          const discLower = discussion.toLowerCase();
 
-          if (q && discLower.includes(q)) {
-            // exact substring match
-            matches.push({ id, title, state, excerpt: extractExcerpt(discussion, qRaw) });
-            continue;
-          }
+          const titleTokens = tokenize(title, 2);
+          const discTokens = tokenize(discussionRaw, 2);
 
-          // token overlap heuristic for related detection
-          let matchedTokens = 0;
-          for (const tok of queryTokens) {
-            if (discLower.includes(tok)) matchedTokens++;
-          }
-          const overlap = queryTokens.length ? matchedTokens / queryTokens.length : 0;
+          if (!queryTokens.length) continue;
 
-          // If overlap >= 50%, treat as a direct match; if >= 25% treat as related
-          if (overlap >= 0.5) {
-            matches.push({ id, title, state, excerpt: extractExcerpt(discussion, qRaw) });
-          } else if (overlap >= 0.25) {
-            related.push({ id, title, state, excerpt: extractExcerpt(discussion, qRaw) });
-          }
+          const matchCountTitle = queryTokens.filter(t => titleTokens.includes(t)).length;
+          const matchCountDisc = queryTokens.filter(t => discTokens.includes(t)).length;
+
+          const titleOverlap = matchCountTitle / queryTokens.length;
+          const discOverlap = matchCountDisc / queryTokens.length;
+
+          // Weighted score: title counts more (0.6) than discussion (0.4)
+          const score = (0.6 * titleOverlap) + (0.4 * discOverlap);
+
+          const excerpt = extractExcerpt(stripHtmlAndNormalize(discussionRaw), qRaw);
+          scored.push({ id, title, state, score, excerpt });
         }
 
-        // Format output
-        if (!matches.length) {
+        if (!scored.length) {
           return { content: [{ type: 'text', text: `No work items found matching: "${query}"` }] };
         }
 
-        let out = '';
-        for (const m of matches) {
-          out += `MATCH -> ID: ${m.id}, Title: ${m.title}, State: ${m.state}\nDiscussion excerpt:\n${m.excerpt}\n\n`;
-          if (related.length) {
-            out += 'Related items:\n';
-            for (const r of related) {
-              out += `  ID: ${r.id}, Title: ${r.title}, State: ${r.state}\n    Excerpt: ${r.excerpt}\n`;
-            }
-            out += '\n';
-          }
+        // Pick top scored item
+        scored.sort((a, b) => b.score - a.score);
+        const top = scored[0];
+        const threshold = 0.3; // 30%
+        if (top.score < threshold) {
+          return { content: [{ type: 'text', text: `No work items found matching: "${query}"` }] };
         }
 
+        const out = `MATCH -> ID: ${top.id}, Title: ${top.title}, State: ${top.state}, Score: ${(top.score * 100).toFixed(0)}%\nDiscussion excerpt:\n${top.excerpt}\n`;
         return { content: [{ type: 'text', text: out }] };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -339,5 +350,3 @@ export const getServer = (): McpServer => {
 
   return server;
 };
-
-
