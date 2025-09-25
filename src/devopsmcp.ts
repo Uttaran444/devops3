@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { URL } from 'url';
 
-// Helper function to safely send notifications (used by makeApiCall)
+/// Helper function to safely send notifications (used by makeApiCall)
 async function safeNotify(sendNotification: (notification: any) => void | Promise<void>, notification: any): Promise<void> {
   try {
     await sendNotification(notification);
@@ -678,3 +678,4 @@ export const getServer = (): McpServer => {
 
   return server;
 };
+
